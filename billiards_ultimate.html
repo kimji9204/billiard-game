@@ -1,0 +1,253 @@
+<!DOCTYPE html>
+<html lang="ko">
+<head>
+    <meta charset="UTF-8">
+    <title>Billiards Master - Ultimate Final</title>
+    <style>
+        body { background-color: #111; color: white; text-align: center; font-family: 'Malgun Gothic', sans-serif; margin: 0; overflow: hidden; }
+        .container { position: relative; width: 800px; margin: 15px auto; }
+        canvas { background-color: #265d2a; border: 15px solid #3d2511; border-radius: 12px; cursor: crosshair; box-shadow: 0 30px 80px rgba(0,0,0,0.9); display: block; }
+        
+        .ui-panel { display: flex; justify-content: space-between; align-items: center; margin-bottom: 10px; padding: 12px; background: #222; border-radius: 10px; border: 1px solid #444; }
+        .status-text { font-size: 1.1em; color: #f1c40f; font-weight: bold; }
+        .team-box { padding: 8px 18px; border-radius: 6px; background: #333; font-size: 0.95em; min-width: 120px; border: 2px solid transparent; transition: all 0.3s; }
+        .my-turn { border-color: #2ecc71; color: #2ecc71; box-shadow: 0 0 10px rgba(46, 204, 113, 0.3); }
+        .ai-turn { border-color: #e74c3c; color: #e74c3c; box-shadow: 0 0 10px rgba(231, 76, 60, 0.3); }
+
+        #pocket-notify {
+            position: absolute; top: 55%; left: 50%; transform: translate(-50%, -50%);
+            font-size: 3.5em; font-weight: 900; color: #fff; text-shadow: 0 0 25px rgba(0,0,0,1);
+            pointer-events: none; opacity: 0; transition: opacity 0.3s; z-index: 100;
+        }
+        .controls { color: #555; font-size: 0.8em; margin-top: 10px; }
+    </style>
+</head>
+<body>
+    <div class="container">
+        <div id="pocket-notify">POCKET!</div>
+        <div class="ui-panel">
+            <div class="team-box" id="myTeamBox">나: 미정</div>
+            <div class="status-text" id="status">경기를 시작하세요!</div>
+            <div class="team-box" id="aiTeamBox">AI: 미정</div>
+        </div>
+        <canvas id="gameCanvas" width="800" height="400"></canvas>
+        <div class="controls">흰 공 파울 시 턴이 즉시 넘어가며 상대방이 공을 재배치합니다. (Space: 재시작)</div>
+    </div>
+
+<script>
+    const canvas = document.getElementById('gameCanvas');
+    const ctx = canvas.getContext('2d');
+    const statusEl = document.getElementById('status');
+    const notifyEl = document.getElementById('pocket-notify');
+    const myTeamBox = document.getElementById('myTeamBox');
+    const aiTeamBox = document.getElementById('aiTeamBox');
+
+    let balls = [];
+    let isDragging = false, isMoving = false, isPlacementMode = false;
+    let mouseX = 0, mouseY = 0;
+    let isMyTurn = true, gameActive = true, assignedTeam = null; 
+    let isScored = false, foulOccurred = false;
+
+    class Ball {
+        constructor(x, y, radius, color, type, num) {
+            this.x = x; this.y = y; this.radius = radius;
+            this.color = color; this.type = type; this.num = num;
+            this.vx = 0; this.vy = 0; this.friction = 0.988; this.inPocket = false;
+        }
+
+        draw() {
+            if (this.inPocket) return;
+            let grad = ctx.createRadialGradient(this.x-4, this.y-4, 1, this.x, this.y, this.radius);
+            grad.addColorStop(0, "#fff"); grad.addColorStop(0.3, this.color); grad.addColorStop(1, "#000");
+            ctx.beginPath(); ctx.arc(this.x, this.y, this.radius, 0, Math.PI*2);
+            ctx.fillStyle = grad; ctx.fill();
+
+            if (this.type === 'striped') {
+                ctx.save(); ctx.beginPath(); ctx.arc(this.x, this.y, this.radius, 0, Math.PI*2); ctx.clip();
+                ctx.fillStyle = "white"; ctx.fillRect(this.x-this.radius, this.y-5, this.radius*2, 10); ctx.restore();
+            }
+            if (this.type !== 'white') {
+                ctx.beginPath(); ctx.arc(this.x, this.y, 5.5, 0, Math.PI*2); ctx.fillStyle = "white"; ctx.fill();
+                ctx.fillStyle = "black"; ctx.font = "bold 9px Arial"; ctx.textAlign = "center"; ctx.fillText(this.num, this.x, this.y+3.5);
+            }
+        }
+
+        update() {
+            if (this.inPocket) return;
+            this.x += this.vx; this.y += this.vy;
+            this.vx *= this.friction; this.vy *= this.friction;
+            if (this.x + this.radius > canvas.width || this.x - this.radius < 0) this.vx *= -0.85;
+            if (this.y + this.radius > canvas.height || this.y - this.radius < 0) this.vy *= -0.85;
+            if (Math.abs(this.vx) < 0.1) this.vx = 0; if (Math.abs(this.vy) < 0.1) this.vy = 0;
+
+            pockets.forEach(p => {
+                if (Math.hypot(this.x - p[0], this.y - p[1]) < 28) {
+                    this.inPocket = true; this.vx = 0; this.vy = 0;
+                    handlePocket(this);
+                }
+            });
+        }
+    }
+
+    const pockets = [[0,0], [400,0], [800,0], [0,400], [400,400], [800,400]];
+
+    function init() {
+        balls = []; assignedTeam = null; gameActive = true; isPlacementMode = false;
+        isMoving = false; isMyTurn = true; foulOccurred = false; isScored = false;
+        updateUI();
+        balls.push(new Ball(200, 200, 13, '#ffffff', 'white', 0));
+        const colors = ['#f1c40f', '#2980b9', '#e74c3c', '#8e44ad', '#e67e22', '#27ae60', '#c0392b', '#000', '#f39c12', '#3498db', '#d35400', '#2ecc71', '#16a085', '#7f8c8d', '#2c3e50'];
+        let idx = 0;
+        for (let col = 0; col < 5; col++) {
+            for (let row = 0; row <= col; row++) {
+                let x = 550 + col * 24; let y = 200 + (row - col/2) * 28;
+                let num = idx + 1;
+                let type = (num === 8) ? 'black' : (num > 8 ? 'striped' : 'solid');
+                balls.push(new Ball(x, y, 13, colors[idx], type, num)); idx++;
+            }
+        }
+    }
+
+    function updateUI() {
+        myTeamBox.innerText = `나: ${assignedTeam === 'solid' ? '색공' : (assignedTeam ? '띠공' : '미정')}`;
+        aiTeamBox.innerText = `AI: ${assignedTeam === 'solid' ? '띠공' : (assignedTeam ? '색공' : '미정')}`;
+        myTeamBox.className = "team-box" + (isMyTurn ? " my-turn" : "");
+        aiTeamBox.className = "team-box" + (!isMyTurn ? " ai-turn" : "");
+    }
+
+    function showNotify(text, color = "#fff") {
+        notifyEl.innerText = text; notifyEl.style.color = color;
+        notifyEl.style.opacity = "1"; setTimeout(() => { notifyEl.style.opacity = "0"; }, 1500);
+    }
+
+    function handlePocket(ball) {
+        if (ball.type === 'white') {
+            foulOccurred = true;
+            isScored = false; 
+            showNotify("파울: 흰 공 포켓!", "#ff5252");
+        } else if (ball.type === 'black') {
+            let myType = assignedTeam;
+            let currentAttackerTeam = isMyTurn ? myType : (myType === 'solid' ? 'striped' : 'solid');
+            let remains = balls.filter(b => !b.inPocket && b.type === currentAttackerTeam).length;
+            if (remains === 0) endGame(isMyTurn ? "승리! 8번공 클리어." : "패배! AI가 8번공을 넣었습니다.");
+            else endGame(isMyTurn ? "패배! 8번공 조기 포켓." : "승리! AI 자폭.");
+        } else {
+            showNotify(`${ball.type === 'solid' ? '색공' : '띠공'} 포켓!`, ball.color);
+            if (!assignedTeam) assignedTeam = isMyTurn ? ball.type : (ball.type === 'solid' ? 'striped' : 'solid');
+            // 공격자가 자기 공을 넣었을 때만 연속 턴
+            let attackerTeam = isMyTurn ? assignedTeam : (assignedTeam === 'solid' ? 'striped' : 'solid');
+            if (ball.type === attackerTeam) isScored = true;
+        }
+    }
+
+    function endGame(msg) { gameActive = false; statusEl.innerText = msg; }
+
+    window.addEventListener('mousemove', e => {
+        const rect = canvas.getBoundingClientRect();
+        mouseX = e.clientX - rect.left; mouseY = e.clientY - rect.top;
+    });
+
+    canvas.addEventListener('mousedown', e => {
+        if (!gameActive) return;
+        if (isPlacementMode) {
+            balls[0].x = e.offsetX; balls[0].y = e.offsetY;
+            balls[0].vx = 0; balls[0].vy = 0;
+            balls[0].inPocket = false; isPlacementMode = false;
+            statusEl.innerText = "배치 완료! 조준하세요."; return;
+        }
+        if (!isMoving && isMyTurn) isDragging = true;
+    });
+
+    window.addEventListener('mouseup', e => {
+        if (isDragging) {
+            let dx = balls[0].x - mouseX, dy = balls[0].y - mouseY;
+            let angle = Math.atan2(dy, dx), dist = Math.hypot(dx, dy);
+            let power = Math.min(dist * 0.18, 45);
+            balls[0].vx = Math.cos(angle) * power; balls[0].vy = Math.sin(angle) * power;
+            isDragging = false; isMoving = true; isScored = false; foulOccurred = false;
+        }
+    });
+
+    function aiTurn() {
+        if (!gameActive) return;
+        statusEl.innerText = "AI 생각 중...";
+        setTimeout(() => {
+            let targets = balls.filter(b => !b.inPocket && b.type !== 'white');
+            let t = targets[Math.floor(Math.random() * targets.length)];
+            if(t) {
+                let angle = Math.atan2(t.y - balls[0].y, t.x - balls[0].x);
+                let power = 15 + Math.random() * 15;
+                balls[0].vx = Math.cos(angle) * power; balls[0].vy = Math.sin(angle) * power;
+                isMoving = true; isScored = false; foulOccurred = false;
+            }
+        }, 1500);
+    }
+
+    function loop() {
+        ctx.clearRect(0, 0, canvas.width, canvas.height);
+        pockets.forEach(p => { ctx.beginPath(); ctx.arc(p[0], p[1], 28, 0, Math.PI*2); ctx.fillStyle="#0a0a0a"; ctx.fill(); });
+
+        // 물리 엔진
+        for(let i=0; i<balls.length; i++) {
+            for(let j=i+1; j<balls.length; j++) {
+                let b1 = balls[i], b2 = balls[j];
+                if (b1.inPocket || b2.inPocket) continue;
+                if (Math.hypot(b1.x-b2.x, b1.y-b2.y) < b1.radius+b2.radius) {
+                    let a = Math.atan2(b2.y-b1.y, b2.x-b1.x), v1 = Math.hypot(b1.vx, b1.vy), v2 = Math.hypot(b2.vx, b2.vy);
+                    b1.vx = -Math.cos(a)*v1; b1.vy = -Math.sin(a)*v1;
+                    b2.vx = Math.cos(a)*(v1+0.5); b2.vy = Math.sin(a)*(v1+0.5);
+                }
+            }
+        }
+
+        balls.forEach(b => { 
+            if (isPlacementMode && b.type === 'white') { ctx.globalAlpha = 0.5; b.x = mouseX; b.y = mouseY; b.draw(); ctx.globalAlpha = 1.0; }
+            else { b.update(); b.draw(); }
+        });
+
+        if (isDragging) {
+            let white = balls[0], angle = Math.atan2(mouseY - white.y, mouseX - white.x), dist = Math.hypot(mouseX-white.x, mouseY-white.y);
+            ctx.save(); ctx.translate(white.x, white.y); ctx.rotate(angle);
+            let cuePos = 20 + Math.min(dist * 0.05, 20);
+            let g = ctx.createLinearGradient(cuePos, 0, cuePos + 300, 0);
+            g.addColorStop(0, "#ffe0b2"); g.addColorStop(1, "#3e2723");
+            ctx.fillStyle = g; ctx.shadowBlur = 10; ctx.fillRect(cuePos, -4.5, 300, 9);
+            ctx.fillStyle = "#fff"; ctx.fillRect(cuePos, -4.5, 6, 9); ctx.restore();
+        }
+
+        // 공이 모두 멈춘 후 로직 처리
+        if (isMoving && !balls.some(b => b.vx !== 0 || b.vy !== 0)) {
+            isMoving = false;
+            
+            if (foulOccurred) {
+                // 파울 시 무조건 턴 교체 후 프리볼
+                isMyTurn = !isMyTurn;
+                if (isMyTurn) {
+                    isPlacementMode = true; balls[0].inPocket = true;
+                    statusEl.innerText = "AI 파울! 흰 공을 배치하세요.";
+                } else {
+                    statusEl.innerText = "나의 파울! AI가 공을 배치합니다.";
+                    setTimeout(() => {
+                        balls[0].inPocket = false; balls[0].x = 150; balls[0].y = 200;
+                        aiTurn();
+                    }, 1500);
+                }
+            } else if (isScored) {
+                // 득점 시 턴 유지
+                statusEl.innerText = (isMyTurn ? "나의" : "AI의") + " 연속 공격!";
+                if (!isMyTurn) aiTurn();
+            } else {
+                // 득점 실패 시 턴 교체
+                isMyTurn = !isMyTurn;
+                statusEl.innerText = isMyTurn ? "당신의 차례입니다." : "AI의 차례입니다.";
+                if (!isMyTurn) aiTurn();
+            }
+            updateUI();
+        }
+        requestAnimationFrame(loop);
+    }
+    window.addEventListener('keydown', e => { if(e.code === 'Space') init(); });
+    init(); loop();
+</script>
+</body>
+</html>
